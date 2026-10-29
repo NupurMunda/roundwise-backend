@@ -1,5 +1,5 @@
 import type {
-  ApiCategory, CompanyDetail, CompanyRef, Counts, DataStore, DsaItem, HldItem, ListItem, Profile, ResourceDetail, Solution, Topic, Value,
+  ApiCategory, CompanyDetail, CompanyRef, Counts, DataStore, DsaItem, Graph, HldItem, ListItem, Profile, ResourceDetail, Solution, Topic, Value,
 } from './types';
 
 export type Row = Record<string, unknown>;
@@ -39,6 +39,26 @@ export const STATS_DDL = `CREATE TABLE company_stats (
   company_id INTEGER PRIMARY KEY REFERENCES companies(id),
   dsa INTEGER NOT NULL, hld INTEGER NOT NULL, ai INTEGER NOT NULL, behavioral INTEGER NOT NULL, has_profile INTEGER NOT NULL
 )`;
+
+// Pairs of companies that share a visible HLD question, a < b.
+export const EDGES_SELECT = `
+WITH hq AS (
+  SELECT DISTINCT cr.company_id, cr.resource_id FROM company_resources cr
+  JOIN resources r ON r.id = cr.resource_id JOIN sources s ON s.id = r.source_id
+  WHERE ${VISIBLE} AND r.category IN (${inList(CATEGORIES.hld)})
+)
+SELECT a.company_id AS company_a, b.company_id AS company_b, COUNT(*) AS weight
+FROM hq a JOIN hq b ON b.resource_id = a.resource_id AND a.company_id < b.company_id
+GROUP BY a.company_id, b.company_id`;
+
+export const EDGES_DDL = `CREATE TABLE company_edges (
+  company_a INTEGER NOT NULL REFERENCES companies(id),
+  company_b INTEGER NOT NULL REFERENCES companies(id),
+  weight INTEGER NOT NULL,
+  PRIMARY KEY (company_a, company_b)
+)`;
+
+export const DERIVED_TABLES_SQL = `CREATE TEMP TABLE company_stats AS ${STATS_SELECT}; CREATE TEMP TABLE company_edges AS ${EDGES_SELECT};`;
 
 const COMPANY_COLUMNS = 'c.id, c.name, c.slug, st.dsa, st.hld, st.ai, st.behavioral';
 const COMPANY_FROM = 'FROM companies c JOIN company_stats st ON st.company_id = c.id';
@@ -184,6 +204,24 @@ export function createStore(run: Run): DataStore {
         companies: companies.map((c) => ({ name: String(c.name), slug: String(c.slug) })),
         solutions: solutions.map(solution),
       } satisfies ResourceDetail;
+    },
+
+    async getGraph(limit): Promise<Graph> {
+      const nodeRows = await run(
+        `SELECT c.id, c.slug, c.name, st.dsa + st.hld + st.ai AS size ${COMPANY_FROM}
+         WHERE st.dsa + st.hld + st.ai > 0 ORDER BY size DESC, c.name LIMIT ?`, [limit],
+      );
+      if (!nodeRows.length) return { nodes: [], edges: [] };
+      const ids = nodeRows.map((r) => num(r.id)).join(',');
+      const edgeRows = await run(
+        `SELECT ca.slug AS a, cb.slug AS b, e.weight FROM company_edges e
+         JOIN companies ca ON ca.id = e.company_a JOIN companies cb ON cb.id = e.company_b
+         WHERE e.company_a IN (${ids}) AND e.company_b IN (${ids}) ORDER BY e.weight DESC, ca.slug, cb.slug`, [],
+      );
+      return {
+        nodes: nodeRows.map((r) => ({ slug: String(r.slug), name: String(r.name), size: num(r.size) })),
+        edges: edgeRows.map((r) => ({ a: String(r.a), b: String(r.b), weight: num(r.weight) })),
+      };
     },
 
     async listSources() {

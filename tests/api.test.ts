@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
 import { memoryRateLimiter } from '../src/rate-limit';
 import { d1Store } from '../src/store/d1';
-import { STATS_SELECT, type Row } from '../src/store/queries';
+import { DERIVED_TABLES_SQL, type Row } from '../src/store/queries';
 import { sqliteStore } from '../src/store/sqlite';
 
 const fixture = new URL('../fixtures/sample.db', import.meta.url).pathname.replace(/^\/(\w:)/, '$1');
@@ -27,7 +27,7 @@ async function get(path: string, target = app) {
 const allPaths = [
   '/health', '/companies', '/companies/acme', '/companies/acme/dsa', '/companies/acme/hld', '/companies/acme/ai',
   '/companies/acme/behavioral', '/companies/globex', '/companies/globex/dsa', '/companies/initech', '/companies/initech/behavioral',
-  '/sources', ...Array.from({ length: 20 }, (_, i) => `/resources/${i + 1}`),
+  '/graph', '/graph?limit=1', '/sources', ...Array.from({ length: 20 }, (_, i) => `/resources/${i + 1}`),
 ];
 
 describe('response shapes', () => {
@@ -109,7 +109,7 @@ describe('response shapes', () => {
     const { body } = await get('/resources/11');
     expect(body.data).toMatchObject({
       id: 11, title: 'Fixture HLD question', category: 'hld', url: 'https://example.test/r/11', difficulty: null,
-      source: { name: 'fx-link', license: 'NONE' }, companies: [{ name: 'Acme', slug: 'acme' }],
+      source: { name: 'fx-link', license: 'NONE' }, companies: [{ name: 'Acme', slug: 'acme' }, { name: 'Globex', slug: 'globex' }],
     });
     expect(body.data.solutions).toHaveLength(1);
     expect((await get('/resources/3')).body.data.category).toBe('dsa');
@@ -233,7 +233,7 @@ describe('d1 adapter', () => {
   it('returns the same results as the sqlite adapter', async () => {
     const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite');
     const db = new DatabaseSync(fixture, { readOnly: true });
-    db.exec(`CREATE TEMP TABLE company_stats AS ${STATS_SELECT}`);
+    db.exec(DERIVED_TABLES_SQL);
     const d1 = { prepare: (sql: string) => ({ bind: (...values: unknown[]) => ({ all: async () => ({ results: db.prepare(sql).all(...(values as never[])) as Row[] }) }) }) };
     const viaD1 = createApp(d1Store(d1), config());
     for (const path of allPaths.filter((p) => p !== '/health')) {
@@ -317,5 +317,75 @@ describe('local: paths', () => {
     const mem = new DatabaseSync(':memory:');
     mem.exec(sql);
     expect(mem.prepare('SELECT url FROM resources WHERE id = 11').get()).toEqual({ url: '' });
+  });
+});
+
+describe('graph', () => {
+  it('returns top companies by visible resources and shared HLD questions', async () => {
+    const { res, body } = await get('/graph');
+    expect(res.status).toBe(200);
+    expect(res.headers.get('Cache-Control')).toBe('public, s-maxage=86400');
+    expect(body.meta).toEqual({ limit: 60 });
+    expect(body.data).toEqual({
+      nodes: [{ slug: 'acme', name: 'Acme', size: 12 }, { slug: 'globex', name: 'Globex', size: 10 }],
+      edges: [{ a: 'acme', b: 'globex', weight: 2 }],
+    });
+  });
+
+  it('only returns edges between returned nodes and honours limit', async () => {
+    const { body } = await get('/graph?limit=1');
+    expect(body.data).toEqual({ nodes: [{ slug: 'acme', name: 'Acme', size: 12 }], edges: [] });
+  });
+
+  it('never counts hidden rows: hidden shared question adds no edge or size', async () => {
+    const { text, body } = await get('/graph?limit=100');
+    expect(text).not.toMatch(/HIDDEN|initech/);
+    expect(body.data.nodes.map((n: any) => n.slug)).not.toContain('initech');
+    expect(body.data.edges.every((e: any) => e.weight === 2)).toBe(true);
+  });
+
+  it('caps limit at 100 and validates params', async () => {
+    expect((await get('/graph?limit=500')).body.meta.limit).toBe(100);
+    for (const path of ['/graph?limit=0', '/graph?limit=abc', '/graph?x=1']) expect((await get(path)).res.status, path).toBe(400);
+  });
+});
+
+describe('rate-limit key', () => {
+  const recorded = () => {
+    const keys: string[] = [];
+    const rateLimiter = { check: async (key: string) => (keys.push(key), { allowed: true, retryAfter: 1 }) };
+    return { keys, app: createApp(sqliteStore(fixture), { ...config(), rateLimiter, apiKey: 'secret-key' }) };
+  };
+  const call = async (app: ReturnType<typeof createApp>, headers: Record<string, string>) => app.request('/v1/health', { headers });
+
+  it('uses x-client-ip when the api key is valid and the value is an IP', async () => {
+    const { keys, app } = recorded();
+    await call(app, { 'x-api-key': 'secret-key', 'x-client-ip': '198.51.100.9' });
+    await call(app, { 'x-api-key': 'secret-key', 'x-client-ip': '2001:DB8::1' });
+    expect(keys).toEqual(['198.51.100.9', '2001:db8::1']);
+  });
+
+  it('uses the connecting IP otherwise', async () => {
+    const { keys, app } = recorded();
+    await call(app, { 'x-client-ip': '198.51.100.9' });
+    await call(app, { 'x-api-key': 'wrong', 'x-client-ip': '198.51.100.9' });
+    await call(app, { 'x-api-key': 'secret-key', 'x-client-ip': 'not-an-ip' });
+    await call(app, { 'x-api-key': 'secret-key', 'x-client-ip': '999.1.1.1' });
+    await call(app, { 'x-api-key': 'secret-key' });
+    expect(keys).toEqual(Array(5).fill('203.0.113.7'));
+  });
+
+  it('ignores x-client-ip when no API_KEY is configured', async () => {
+    const keys: string[] = [];
+    const open = createApp(sqliteStore(fixture), { ...config(), rateLimiter: { check: async (k) => (keys.push(k), { allowed: true, retryAfter: 1 }) } });
+    await open.request('/v1/health', { headers: { 'x-api-key': 'anything', 'x-client-ip': '198.51.100.9' } });
+    expect(keys).toEqual(['203.0.113.7']);
+  });
+
+  it('limits each forwarded client separately', async () => {
+    const app = createApp(sqliteStore(fixture), { ...config(), rateLimiter: memoryRateLimiter(2), apiKey: 'secret-key' });
+    const as = (ip: string) => app.request('/v1/health', { headers: { 'x-api-key': 'secret-key', 'x-client-ip': ip } });
+    expect([(await as('198.51.100.1')).status, (await as('198.51.100.1')).status, (await as('198.51.100.1')).status]).toEqual([200, 200, 429]);
+    expect((await as('198.51.100.2')).status).toBe(200);
   });
 });

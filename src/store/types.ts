@@ -113,6 +113,23 @@ export interface DsaQuery extends Paging {
   topic?: string;
 }
 
+export interface GraphNode {
+  slug: string;
+  name: string;
+  size: number;
+}
+
+export interface GraphEdge {
+  a: string;
+  b: string;
+  weight: number;
+}
+
+export interface Graph {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
 export interface DataStore {
   listCompanies(q: string | undefined, paging: Paging): Promise<Page<CompanySummary>>;
   findCompany(slug: string): Promise<CompanyRef | null>;
@@ -123,4 +140,5 @@ export interface DataStore {
   getBehavioral(companyId: number): Promise<{ values: Value[]; topics: Topic[] }>;
   getResource(id: number): Promise<ResourceDetail | null>;
   listSources(): Promise<SourceCredit[]>;
+  getGraph(limit: number): Promise<Graph>;
 }

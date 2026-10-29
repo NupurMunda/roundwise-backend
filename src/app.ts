@@ -24,7 +24,11 @@ const paging = {
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).default(20).transform((n) => Math.min(n, MAX_LIMIT)),
 };
+const MAX_GRAPH_NODES = 100;
 const noQuery = z.object({}).strict();
+const graphQuery = z
+  .object({ limit: z.coerce.number().int().min(1).default(60).transform((n) => Math.min(n, MAX_GRAPH_NODES)) })
+  .strict();
 const pagedQuery = z.object(paging).strict();
 const companiesQuery = z.object({ ...paging, q: z.string().trim().min(1).max(100).optional() }).strict();
 const dsaQuery = z
@@ -44,6 +48,19 @@ function parse<S extends z.ZodTypeAny>(c: Context, schema: S): z.infer<S> {
   return result.data;
 }
 
+// Returns the normalised address, or null when the value is not an IP address.
+function parseIp(value: string | undefined): string | null {
+  const v = value?.trim();
+  if (!v) return null;
+  if (/^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/.test(v)) return v;
+  if (!v.includes(':') || !/^[0-9a-fA-F:.]+$/.test(v)) return null;
+  try {
+    return new URL(`http://[${v}]`).hostname.slice(1, -1);
+  } catch {
+    return null;
+  }
+}
+
 const paged = (page: number, limit: number) => ({ page, limit, offset: (page - 1) * limit });
 
 export function createApp(store: DataStore, config: AppConfig) {
@@ -55,12 +72,16 @@ export function createApp(store: DataStore, config: AppConfig) {
     if (!found) throw new HttpError(404, 'not_found', 'company not found');
     return found;
   };
+  const rateLimitKey = (c: Context) => {
+    const forwarded = config.apiKey && c.req.header('x-api-key') === config.apiKey ? parseIp(c.req.header('x-client-ip')) : null;
+    return forwarded ?? config.clientIp(c);
+  };
   const listing = (c: Context, data: unknown[], page: number, limit: number, total: number, extra: object = {}) =>
     c.json({ data, meta: { page, limit, total, ...extra } });
 
   v1.use('*', cors({ origin: config.allowedOrigin, allowMethods: ['GET', 'OPTIONS'] }));
   v1.use('*', async (c, next) => {
-    const { allowed, retryAfter } = await config.rateLimiter.check(config.clientIp(c));
+    const { allowed, retryAfter } = await config.rateLimiter.check(rateLimitKey(c));
     if (!allowed) {
       return c.json({ error: { code: 'rate_limited', message: 'too many requests' } }, 429, { 'Retry-After': String(retryAfter) });
     }
@@ -132,6 +153,11 @@ export function createApp(store: DataStore, config: AppConfig) {
     const resource = await store.getResource(id);
     if (!resource) throw new HttpError(404, 'not_found', 'resource not found');
     return c.json({ data: resource, meta: {} });
+  });
+
+  v1.get('/graph', async (c) => {
+    const { limit } = parse(c, graphQuery);
+    return c.json({ data: await store.getGraph(limit), meta: { limit } });
   });
 
   v1.get('/sources', async (c) => {
