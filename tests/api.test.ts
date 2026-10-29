@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import { createRequire } from 'node:module';
 import { describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
@@ -265,5 +265,57 @@ describe('export-d1 script', () => {
       expect(b.res.status, path).toBe(a.res.status);
       expect(b.body, path).toEqual(a.body);
     }
+  });
+});
+
+describe('api key gate', () => {
+  const keyed = createApp(sqliteStore(fixture), { ...config(), apiKey: 'secret-key' });
+
+  it('requires x-api-key on every route except /health when API_KEY is set', async () => {
+    for (const path of ['/companies', '/companies/acme', '/resources/3', '/sources', '/nothing']) {
+      const res = await keyed.request(`/v1${path}`);
+      expect(res.status, path).toBe(401);
+      expect((await res.json() as any).error.code).toBe('unauthorized');
+    }
+    expect((await keyed.request('/v1/companies', { headers: { 'x-api-key': 'wrong' } })).status).toBe(401);
+    expect((await keyed.request('/v1/companies', { headers: { 'x-api-key': 'secret-key' } })).status).toBe(200);
+    expect((await keyed.request('/v1/health')).status).toBe(200);
+  });
+
+  it('skips the check when API_KEY is not set', async () => {
+    expect((await app.request('/v1/companies')).status).toBe(200);
+  });
+});
+
+describe('hld urls', () => {
+  it('returns url null for HLD question items', async () => {
+    const { body } = await get('/companies/acme/hld');
+    expect(body.data.map((d: any) => d.url)).toEqual([null, null]);
+  });
+});
+
+describe('local: paths', () => {
+  it('never reach responses or the export', async () => {
+    const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite');
+    const copy = join(mkdtempSync(join(tmpdir(), 'rw-local-')), 'local.db');
+    const src = new DatabaseSync(fixture);
+    src.exec(`VACUUM INTO '${copy.split(sep).join('/')}'`);
+    src.close();
+    const db = new DatabaseSync(copy);
+    db.exec("UPDATE resources SET url = 'local:data/seed/q.md#1' WHERE id = 11; UPDATE sources SET repo_url = 'local:data/seed/q.md' WHERE id = 4");
+    db.close();
+    const localApp = createApp(sqliteStore(copy), config());
+    for (const path of ['/resources/11', '/sources', '/companies/acme/hld', '/companies/acme']) {
+      expect(await (await localApp.request(`/v1${path}`)).text(), path).not.toContain('local:');
+    }
+    expect(((await (await localApp.request('/v1/resources/11')).json()) as any).data.url).toBeNull();
+
+    const out = join(mkdtempSync(join(tmpdir(), 'rw-export-')), 'import.sql');
+    execFileSync(process.execPath, ['--import', 'tsx', 'scripts/export-d1.mjs', out], { env: { ...process.env, KB_DB_PATH: copy }, stdio: 'pipe' });
+    const sql = readFileSync(out, 'utf8');
+    expect(sql).not.toContain('local:');
+    const mem = new DatabaseSync(':memory:');
+    mem.exec(sql);
+    expect(mem.prepare('SELECT url FROM resources WHERE id = 11').get()).toEqual({ url: '' });
   });
 });

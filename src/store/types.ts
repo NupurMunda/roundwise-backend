@@ -73,7 +73,7 @@ export interface CompanyDetail {
 export interface DsaItem {
   id: number;
   title: string;
-  url: string;
+  url: string | null;
   difficulty: Difficulty | null;
   topics: string[];
   frequency: number | null;
@@ -89,12 +89,13 @@ export interface Solution {
 export interface ListItem {
   id: number;
   title: string;
-  url: string;
+  url: string | null;
   difficulty: string | null;
   topics: string[];
 }
 
 export interface HldItem extends ListItem {
+  url: null;
   solutions: Solution[];
 }
 

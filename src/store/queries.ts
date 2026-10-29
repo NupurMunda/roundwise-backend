@@ -49,8 +49,11 @@ const str = (v: unknown) => (v == null ? null : String(v));
 const topics = (v: unknown): string[] => JSON.parse(String(v ?? '[]'));
 const counts = (r: Row): Counts => ({ dsa: num(r.dsa), hld: num(r.hld), ai: num(r.ai), behavioral: num(r.behavioral) });
 
+const publicUrl = (v: unknown) => (typeof v === 'string' && v !== '' && !v.startsWith('local:') ? v : null);
+const publicRepoUrl = (v: unknown) => publicUrl(v) ?? 'unknown';
+
 const listItem = (r: Row): ListItem => ({
-  id: num(r.id), title: String(r.title), url: String(r.url), difficulty: str(r.difficulty), topics: topics(r.topics),
+  id: num(r.id), title: String(r.title), url: publicUrl(r.url), difficulty: str(r.difficulty), topics: topics(r.topics),
 });
 const solution = (r: Row): Solution => ({ title: String(r.title), url: String(r.url), confidence: String(r.confidence), source: String(r.source) });
 
@@ -114,7 +117,7 @@ export function createStore(run: Run): DataStore {
       );
       return {
         name: company.name, slug: company.slug, profile, categories: company.counts, values: await values(company.id),
-        sources: sources.map((s) => ({ name: String(s.name), repo_url: String(s.repo_url), license: String(s.license) })),
+        sources: sources.map((s) => ({ name: String(s.name), repo_url: publicRepoUrl(s.repo_url), license: String(s.license) })),
       };
     },
 
@@ -144,7 +147,7 @@ export function createStore(run: Run): DataStore {
       );
       const byQuestion = new Map<number, Solution[]>();
       for (const r of rows) byQuestion.set(num(r.question_id), [...(byQuestion.get(num(r.question_id)) ?? []), solution(r)]);
-      return { total: page.total, items: page.items.map((i): HldItem => ({ ...i, solutions: byQuestion.get(i.id) ?? [] })) };
+      return { total: page.total, items: page.items.map((i): HldItem => ({ ...i, url: null, solutions: byQuestion.get(i.id) ?? [] })) };
     },
 
     listAi: (companyId, { limit, offset }) => categoryPage(companyId, 'ai', limit, offset),
@@ -189,7 +192,7 @@ export function createStore(run: Run): DataStore {
          FROM sources s WHERE ${VISIBLE} ORDER BY s.id`, [],
       );
       return rows.map((r) => ({
-        name: String(r.name), repo_url: String(r.repo_url), license: String(r.license), author: str(r.author),
+        name: String(r.name), repo_url: publicRepoUrl(r.repo_url), license: String(r.license), author: str(r.author),
         license_text: str(r.license_text), notice_text: str(r.notice_text), adapted: num(r.adapted) === 1, adaptation_note: str(r.adaptation_note),
       }));
     },

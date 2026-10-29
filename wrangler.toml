@@ -7,8 +7,8 @@ ALLOWED_ORIGIN = "http://localhost:5173"
 
 [[d1_databases]]
 binding = "DB"
-database_name = "roundwise"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_name = "roundwise-db"
+database_id = "b0415518-0175-4271-9acb-076f7afd43de"
 
 [[unsafe.bindings]]
 name = "RATE_LIMITER"

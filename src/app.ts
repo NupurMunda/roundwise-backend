@@ -6,6 +6,7 @@ import type { CompanyRef, DataStore } from './store/types';
 
 export interface AppConfig {
   allowedOrigin: string;
+  apiKey?: string;
   rateLimiter: RateLimiter;
   clientIp(c: Context): string;
 }
@@ -62,6 +63,12 @@ export function createApp(store: DataStore, config: AppConfig) {
     const { allowed, retryAfter } = await config.rateLimiter.check(config.clientIp(c));
     if (!allowed) {
       return c.json({ error: { code: 'rate_limited', message: 'too many requests' } }, 429, { 'Retry-After': String(retryAfter) });
+    }
+    await next();
+  });
+  v1.use('*', async (c, next) => {
+    if (config.apiKey && c.req.path !== '/v1/health' && c.req.header('x-api-key') !== config.apiKey) {
+      return c.json({ error: { code: 'unauthorized', message: 'missing or invalid x-api-key' } }, 401);
     }
     await next();
   });
