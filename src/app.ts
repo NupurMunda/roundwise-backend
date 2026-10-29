@@ -1,0 +1,144 @@
+import { Hono, type Context } from 'hono';
+import { cors } from 'hono/cors';
+import { z } from 'zod';
+import type { RateLimiter } from './rate-limit';
+import type { CompanyRef, DataStore } from './store/types';
+
+export interface AppConfig {
+  allowedOrigin: string;
+  rateLimiter: RateLimiter;
+  clientIp(c: Context): string;
+}
+
+class HttpError extends Error {
+  constructor(readonly status: 400 | 404, readonly code: string, message: string) {
+    super(message);
+  }
+}
+
+const MAX_LIMIT = 50;
+const MIN_WINDOW_ROWS = 5;
+
+const paging = {
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).default(20).transform((n) => Math.min(n, MAX_LIMIT)),
+};
+const noQuery = z.object({}).strict();
+const pagedQuery = z.object(paging).strict();
+const companiesQuery = z.object({ ...paging, q: z.string().trim().min(1).max(100).optional() }).strict();
+const dsaQuery = z
+  .object({
+    ...paging,
+    time_window: z.enum(['30d', '3m', '6m', '6m+', 'all']).default('6m'),
+    difficulty: z.enum(['easy', 'medium', 'hard']).optional(),
+    topic: z.string().trim().min(1).max(80).optional(),
+  })
+  .strict();
+
+function parse<S extends z.ZodTypeAny>(c: Context, schema: S): z.infer<S> {
+  const result = schema.safeParse(Object.fromEntries(new URL(c.req.url).searchParams));
+  if (!result.success) {
+    throw new HttpError(400, 'bad_request', result.error.issues.map((i) => `${i.path.join('.') || 'query'}: ${i.message}`).join('; '));
+  }
+  return result.data;
+}
+
+const paged = (page: number, limit: number) => ({ page, limit, offset: (page - 1) * limit });
+
+export function createApp(store: DataStore, config: AppConfig) {
+  const app = new Hono();
+  const v1 = new Hono();
+
+  const company = async (c: Context): Promise<CompanyRef> => {
+    const found = await store.findCompany(c.req.param('slug') ?? '');
+    if (!found) throw new HttpError(404, 'not_found', 'company not found');
+    return found;
+  };
+  const listing = (c: Context, data: unknown[], page: number, limit: number, total: number, extra: object = {}) =>
+    c.json({ data, meta: { page, limit, total, ...extra } });
+
+  v1.use('*', cors({ origin: config.allowedOrigin, allowMethods: ['GET', 'OPTIONS'] }));
+  v1.use('*', async (c, next) => {
+    const { allowed, retryAfter } = await config.rateLimiter.check(config.clientIp(c));
+    if (!allowed) {
+      return c.json({ error: { code: 'rate_limited', message: 'too many requests' } }, 429, { 'Retry-After': String(retryAfter) });
+    }
+    await next();
+  });
+  v1.use('*', async (c, next) => {
+    await next();
+    if (c.req.path !== '/v1/health' && c.res.status === 200) c.header('Cache-Control', 'public, s-maxage=86400');
+  });
+
+  v1.get('/health', (c) => {
+    parse(c, noQuery);
+    return c.json({ data: { status: 'ok' }, meta: {} });
+  });
+
+  v1.get('/companies', async (c) => {
+    const { q, page, limit } = parse(c, companiesQuery);
+    const { items, total } = await store.listCompanies(q, paged(page, limit));
+    return listing(c, items, page, limit, total);
+  });
+
+  v1.get('/companies/:slug', async (c) => {
+    parse(c, noQuery);
+    return c.json({ data: await store.getCompany(await company(c)), meta: {} });
+  });
+
+  v1.get('/companies/:slug/dsa', async (c) => {
+    const query = parse(c, dsaQuery);
+    const { id } = await company(c);
+    const { page, limit, offset } = paged(query.page, query.limit);
+    const base = { difficulty: query.difficulty, topic: query.topic, limit, offset };
+    let timeWindow = query.time_window;
+    let result = await store.listDsa(id, { ...base, timeWindow });
+    const fallback = result.total < MIN_WINDOW_ROWS && timeWindow !== 'all';
+    if (fallback) {
+      timeWindow = 'all';
+      result = await store.listDsa(id, { ...base, timeWindow });
+    }
+    return listing(c, result.items, page, limit, result.total, { time_window: timeWindow, fallback });
+  });
+
+  v1.get('/companies/:slug/hld', async (c) => {
+    const { page, limit } = parse(c, pagedQuery);
+    const { items, total } = await store.listHld((await company(c)).id, paged(page, limit));
+    return listing(c, items, page, limit, total);
+  });
+
+  v1.get('/companies/:slug/ai', async (c) => {
+    const { page, limit } = parse(c, pagedQuery);
+    const { items, total } = await store.listAi((await company(c)).id, paged(page, limit));
+    return listing(c, items, page, limit, total);
+  });
+
+  v1.get('/companies/:slug/behavioral', async (c) => {
+    parse(c, noQuery);
+    return c.json({ data: await store.getBehavioral((await company(c)).id), meta: {} });
+  });
+
+  v1.get('/resources/:id', async (c) => {
+    parse(c, noQuery);
+    const id = Number(c.req.param('id'));
+    if (!Number.isSafeInteger(id) || id < 1) throw new HttpError(400, 'bad_request', 'id must be a positive integer');
+    const resource = await store.getResource(id);
+    if (!resource) throw new HttpError(404, 'not_found', 'resource not found');
+    return c.json({ data: resource, meta: {} });
+  });
+
+  v1.get('/sources', async (c) => {
+    parse(c, noQuery);
+    const data = await store.listSources();
+    return c.json({ data, meta: { total: data.length } });
+  });
+
+  app.route('/v1', v1);
+  app.notFound((c) => c.json({ error: { code: 'not_found', message: 'route not found' } }, 404));
+  app.onError((err, c) => {
+    if (err instanceof HttpError) return c.json({ error: { code: err.code, message: err.message } }, err.status);
+    console.error(err);
+    return c.json({ error: { code: 'internal', message: 'internal error' } }, 500);
+  });
+  return app;
+}
