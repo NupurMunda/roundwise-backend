@@ -166,6 +166,14 @@ export function createApp(store: DataStore, config: AppConfig) {
     return c.json({ data, meta: { total: data.length } });
   });
 
+  // One JSON line per request: the route pattern (not the URL), status and time. No IPs, keys or query values.
+  app.use('*', async (c, next) => {
+    const started = Date.now();
+    await next();
+    const route = c.req.matchedRoutes.map((r) => r.path).filter((p) => !p.endsWith('*')).at(-1) ?? 'unmatched';
+    console.log(JSON.stringify({ event: 'request', method: c.req.method, route, status: c.res.status, ms: Date.now() - started }));
+  });
+
   app.route('/v1', v1);
   app.notFound((c) => c.json({ error: { code: 'not_found', message: 'route not found' } }, 404));
   app.onError((err, c) => {

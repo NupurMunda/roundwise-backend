@@ -80,3 +80,28 @@ describe('query plans', () => {
     expect(seen.length).toBeGreaterThan(15);
   });
 });
+
+describe('request log', () => {
+  it('writes one JSON line per request with route, status and time only', async () => {
+    const { vi } = await import('vitest');
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, 'log').mockImplementation((line: string) => void lines.push(line));
+    try {
+      const app = createApp(sqliteStore(fixture), { ...config, apiKey: 'secret-key' });
+      const headers = { 'x-api-key': 'secret-key', 'x-client-ip': '198.51.100.9' };
+      await app.request('/v1/companies/acme/dsa?topic=Array&time_window=all', { headers });
+      await app.request('/v1/companies/nope', { headers });
+      await app.request('/v1/companies');
+      await app.request('/v1/health');
+      await app.request('/v1/nothing');
+    } finally {
+      spy.mockRestore();
+    }
+    const logged = lines.map((l) => JSON.parse(l));
+    expect(logged.map((l) => [l.route, l.status])).toEqual([
+      ['/v1/companies/:slug/dsa', 200], ['/v1/companies/:slug', 404], ['/v1/companies', 401], ['/v1/health', 200], ['unmatched', 401],
+    ]);
+    expect(logged.every((l) => l.event === 'request' && l.method === 'GET' && typeof l.ms === 'number')).toBe(true);
+    expect(lines.join('\n')).not.toMatch(/198\.51\.100|secret-key|Array|time_window|acme/);
+  });
+});

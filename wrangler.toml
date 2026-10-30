@@ -2,6 +2,10 @@ name = "roundwise-backend"
 main = "src/worker.ts"
 compatibility_date = "2025-01-01"
 
+[observability]
+enabled = true
+head_sampling_rate = 1
+
 [vars]
 ALLOWED_ORIGIN = "http://localhost:5173"
 

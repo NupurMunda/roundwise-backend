@@ -56,3 +56,10 @@ Rate limiting is 60 requests/min per IP: in memory locally, the Workers rate-lim
 ## Layout
 
 `src/app.ts` routes · `src/store/queries.ts` the SQL, shared by both adapters · `src/store/sqlite.ts` and `src/store/d1.ts` thin adapters · `src/rate-limit.ts` · `src/server.ts` and `src/worker.ts` entries. The local adapter builds `company_stats` as a temp table, so the database file is never written.
+
+## Traffic and usage
+
+- **Request log**: every request writes one JSON line, `{"event":"request","method":"GET","route":"/v1/companies/:slug/dsa","status":200,"ms":12}`. It holds the route pattern, status and time only; no IPs, keys or query values. Observability is on in `wrangler.toml`, so view it in the Cloudflare dashboard under **Workers & Pages → roundwise-backend → Logs**, or live with `npx wrangler tail roundwise-backend --format pretty`.
+- **Request, error and CPU graphs**: the same page, under **Metrics**. A rise in 503s means D1 is failing (for example the daily free limit).
+- **D1 cost**: `npm run usage` lists the ten queries that read the most rows today. The free plan allows 5,000,000 rows read and 100,000 rows written per day, so check this after any query change.
+- **Per-visitor limits**: the Netlify proxy forwards each visitor's IP as `x-client-ip`, so the 60 requests/minute limit is per visitor, not per proxy.
