@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { DERIVED_TABLES_SQL, EDGES_DDL, STATS_DDL } from '../src/store/queries.ts';
+import { DERIVED_TABLES_SQL, EDGES_DDL, SOURCES_DDL, STATS_DDL } from '../src/store/queries.ts';
 
 const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite');
 const dbPath = process.env.KB_DB_PATH ?? 'C:\\Project\\kb\\data\\kb.db';
@@ -30,6 +30,7 @@ const tables = [
   ['behavioral_topics', `SELECT t.* FROM behavioral_topics t JOIN sources s ON s.id = t.source_id WHERE ${OK_SOURCE} ORDER BY t.rowid`],
   ['company_stats', 'SELECT * FROM temp.company_stats ORDER BY company_id'],
   ['company_edges', 'SELECT * FROM temp.company_edges ORDER BY company_a, company_b'],
+  ['company_sources', 'SELECT * FROM temp.company_sources ORDER BY company_id, source_id'],
 ];
 
 const literal = (v) => (v === null || v === undefined ? 'NULL' : typeof v === 'number' || typeof v === 'bigint' ? String(v) : `'${String(v).replaceAll("'", "''")}'`);
@@ -41,6 +42,8 @@ const ddl = (table) =>
     ? STATS_DDL
     : table === 'company_edges'
     ? EDGES_DDL
+    : table === 'company_sources'
+    ? SOURCES_DDL
     : db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(table).sql.replace('content_md TEXT NOT NULL', 'content_md TEXT').replace("CHECK (url <> '')", '');
 const indexes = (table) => db.prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL").all(table).map((r) => r.sql);
 

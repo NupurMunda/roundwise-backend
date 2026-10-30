@@ -58,7 +58,22 @@ export const EDGES_DDL = `CREATE TABLE company_edges (
   PRIMARY KEY (company_a, company_b)
 )`;
 
-export const DERIVED_TABLES_SQL = `CREATE TEMP TABLE company_stats AS ${STATS_SELECT}; CREATE TEMP TABLE company_edges AS ${EDGES_SELECT};`;
+// Visible sources behind each company's resources, profile and values, so a company page needs no scan.
+export const SOURCES_SELECT = `
+SELECT x.company_id, x.source_id FROM (
+  SELECT cr.company_id, r.source_id FROM company_resources cr JOIN resources r ON r.id = cr.resource_id
+  WHERE r.category IN (${SERVED_CATEGORIES})
+  UNION SELECT company_id, source_id FROM company_profiles
+  UNION SELECT company_id, source_id FROM company_values
+) x JOIN sources s ON s.id = x.source_id WHERE ${VISIBLE}`;
+
+export const SOURCES_DDL = `CREATE TABLE company_sources (
+  company_id INTEGER NOT NULL REFERENCES companies(id),
+  source_id INTEGER NOT NULL REFERENCES sources(id),
+  PRIMARY KEY (company_id, source_id)
+)`;
+
+export const DERIVED_TABLES_SQL = `CREATE TEMP TABLE company_stats AS ${STATS_SELECT}; CREATE TEMP TABLE company_edges AS ${EDGES_SELECT}; CREATE TEMP TABLE company_sources AS ${SOURCES_SELECT};`;
 
 const COMPANY_COLUMNS = 'c.id, c.name, c.slug, st.dsa, st.hld, st.ai, st.behavioral';
 const COMPANY_FROM = 'FROM companies c JOIN company_stats st ON st.company_id = c.id';
@@ -128,12 +143,8 @@ export function createStore(run: Run): DataStore {
         };
       }
       const sources = await run(
-        `SELECT s.name, s.repo_url, s.license FROM sources s WHERE ${VISIBLE} AND (
-           EXISTS (SELECT 1 FROM company_resources cr JOIN resources r ON r.id = cr.resource_id
-                   WHERE cr.company_id = ? AND r.source_id = s.id AND r.category IN (${SERVED_CATEGORIES}))
-           OR EXISTS (SELECT 1 FROM company_profiles cp WHERE cp.company_id = ? AND cp.source_id = s.id)
-           OR EXISTS (SELECT 1 FROM company_values cv WHERE cv.company_id = ? AND cv.source_id = s.id)
-         ) ORDER BY s.id`, [company.id, company.id, company.id],
+        `SELECT s.name, s.repo_url, s.license FROM company_sources cs JOIN sources s ON s.id = cs.source_id
+         WHERE cs.company_id = ? ORDER BY s.id`, [company.id],
       );
       return {
         name: company.name, slug: company.slug, profile, categories: company.counts, values: await values(company.id),
