@@ -73,7 +73,15 @@ export const SOURCES_DDL = `CREATE TABLE company_sources (
   PRIMARY KEY (company_id, source_id)
 )`;
 
-export const DERIVED_TABLES_SQL = `CREATE TEMP TABLE company_stats AS ${STATS_SELECT}; CREATE TEMP TABLE company_edges AS ${EDGES_SELECT}; CREATE TEMP TABLE company_sources AS ${SOURCES_SELECT};`;
+// Local copy of the exported tables, built from the same DDL so primary keys (and query plans) match D1.
+const tempTable = (ddl: string, name: string, select: string) =>
+  `${ddl.replace('CREATE TABLE', 'CREATE TEMP TABLE').replace(/ REFERENCES \w+\(\w+\)/g, '')}; INSERT INTO ${name} SELECT * FROM (${select});`;
+
+export const DERIVED_TABLES_SQL = [
+  tempTable(STATS_DDL, 'company_stats', STATS_SELECT),
+  tempTable(EDGES_DDL, 'company_edges', EDGES_SELECT),
+  tempTable(SOURCES_DDL, 'company_sources', SOURCES_SELECT),
+].join('\n');
 
 const COMPANY_COLUMNS = 'c.id, c.name, c.slug, st.dsa, st.hld, st.ai, st.behavioral';
 const COMPANY_FROM = 'FROM companies c JOIN company_stats st ON st.company_id = c.id';

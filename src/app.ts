@@ -2,7 +2,7 @@ import { Hono, type Context } from 'hono';
 import { cors } from 'hono/cors';
 import { z } from 'zod';
 import type { RateLimiter } from './rate-limit';
-import type { CompanyRef, DataStore } from './store/types';
+import { StoreUnavailableError, type CompanyRef, type DataStore } from './store/types';
 
 export interface AppConfig {
   allowedOrigin: string;
@@ -170,6 +170,10 @@ export function createApp(store: DataStore, config: AppConfig) {
   app.notFound((c) => c.json({ error: { code: 'not_found', message: 'route not found' } }, 404));
   app.onError((err, c) => {
     if (err instanceof HttpError) return c.json({ error: { code: err.code, message: err.message } }, err.status);
+    if (err instanceof StoreUnavailableError) {
+      console.error('database unavailable', err.cause);
+      return c.json({ error: { code: 'temporarily_unavailable', message: 'the data service is temporarily unavailable, try again shortly' } }, 503, { 'Retry-After': '300' });
+    }
     console.error(err);
     return c.json({ error: { code: 'internal', message: 'internal error' } }, 500);
   });

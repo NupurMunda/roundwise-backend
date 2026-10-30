@@ -130,6 +130,8 @@ export interface Graph {
   edges: GraphEdge[];
 }
 
+export class StoreUnavailableError extends Error {}
+
 export interface DataStore {
   listCompanies(q: string | undefined, paging: Paging): Promise<Page<CompanySummary>>;
   findCompany(slug: string): Promise<CompanyRef | null>;
