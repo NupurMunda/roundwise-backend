@@ -61,6 +61,23 @@ function parseIp(value: string | undefined): string | null {
   }
 }
 
+const trackQuery = z
+  .object({
+    kind: z.enum(['view', 'query', 'error']),
+    page: z.enum(['home', 'company', 'sources']).optional(),
+    company: z.string().regex(/^[a-z0-9-]{1,60}$/).optional(),
+    category: z.enum(['dsa', 'hld', 'ai', 'behavioral']).optional(),
+    status: z.coerce.number().int().min(0).max(599).optional(),
+  })
+  .strict();
+
+// A visitor is counted as a short hash of their address and the UTC date: it lets us count distinct
+// visitors per day, changes every day, and cannot be turned back into the address.
+async function visitorId(ip: string, day: string, pepper: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${ip}|${day}|${pepper}`));
+  return [...new Uint8Array(digest).slice(0, 6)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
 const paged = (page: number, limit: number) => ({ page, limit, offset: (page - 1) * limit });
 
 export function createApp(store: DataStore, config: AppConfig) {
@@ -95,7 +112,8 @@ export function createApp(store: DataStore, config: AppConfig) {
   });
   v1.use('*', async (c, next) => {
     await next();
-    if (c.req.path !== '/v1/health' && c.res.status === 200) c.header('Cache-Control', 'public, s-maxage=86400');
+    if (c.req.path === '/v1/ping') c.header('Cache-Control', 'no-store');
+    else if (c.req.path !== '/v1/health' && c.res.status === 200) c.header('Cache-Control', 'public, s-maxage=86400');
   });
 
   v1.get('/health', (c) => {
@@ -164,6 +182,14 @@ export function createApp(store: DataStore, config: AppConfig) {
     parse(c, noQuery);
     const data = await store.listSources();
     return c.json({ data, meta: { total: data.length } });
+  });
+
+  // The browser reports what visitors did, because the CDN answers most repeat views without reaching us.
+  v1.get('/ping', async (c) => {
+    const event = parse(c, trackQuery);
+    const visitor = await visitorId(rateLimitKey(c), new Date().toISOString().slice(0, 10), config.apiKey ?? '');
+    console.log(JSON.stringify({ event: 'track', ...event, visitor }));
+    return c.json({ data: { ok: true }, meta: {} });
   });
 
   // One JSON line per request: the route pattern (not the URL), status and time. No IPs, keys or query values.

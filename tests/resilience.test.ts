@@ -105,3 +105,64 @@ describe('request log', () => {
     expect(lines.join('\n')).not.toMatch(/198\.51\.100|secret-key|Array|time_window|acme/);
   });
 });
+
+describe('visitor tracking', () => {
+  const run = async (calls: { path: string; ip?: string; key?: string }[]) => {
+    const { vi } = await import('vitest');
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, 'log').mockImplementation((line: string) => void lines.push(line));
+    const out: Response[] = [];
+    try {
+      const app = createApp(sqliteStore(fixture), { ...config, apiKey: 'secret-key' });
+      for (const call of calls) {
+        out.push(await app.request(call.path, { headers: { 'x-api-key': call.key ?? 'secret-key', 'x-client-ip': call.ip ?? '198.51.100.9' } }));
+      }
+    } finally {
+      spy.mockRestore();
+    }
+    return { out, events: lines.map((l) => JSON.parse(l)).filter((l) => l.event === 'track'), text: lines.join('\n') };
+  };
+
+  it('logs one event per ping, never caches it, and stores no address', async () => {
+    const { out, events, text } = await run([
+      { path: '/v1/ping?kind=view&page=company&company=acme' },
+      { path: '/v1/ping?kind=query&company=acme&category=hld' },
+      { path: '/v1/ping?kind=error&status=503' },
+    ]);
+    expect(out.map((r) => r.status)).toEqual([200, 200, 200]);
+    expect(out.every((r) => r.headers.get('Cache-Control') === 'no-store')).toBe(true);
+    expect(events.map((e) => [e.kind, e.page, e.company, e.category, e.status])).toEqual([
+      ['view', 'company', 'acme', undefined, undefined], ['query', undefined, 'acme', 'hld', undefined], ['error', undefined, undefined, undefined, 503],
+    ]);
+    expect(events.every((e) => /^[0-9a-f]{12}$/.test(e.visitor))).toBe(true);
+    expect(text).not.toMatch(/198\.51\.100|secret-key/);
+  });
+
+  it('gives the same visitor the same id, and different visitors different ids', async () => {
+    const { events } = await run([
+      { path: '/v1/ping?kind=view&page=home', ip: '198.51.100.9' },
+      { path: '/v1/ping?kind=view&page=home', ip: '198.51.100.9' },
+      { path: '/v1/ping?kind=view&page=home', ip: '198.51.100.10' },
+    ]);
+    expect(events[0].visitor).toBe(events[1].visitor);
+    expect(events[0].visitor).not.toBe(events[2].visitor);
+  });
+
+  it('rejects unknown kinds, categories, odd slugs and extra params', async () => {
+    const { out, events } = await run([
+      { path: '/v1/ping?kind=hack' },
+      { path: '/v1/ping?kind=query&category=secret' },
+      { path: '/v1/ping?kind=view&company=Acme%20Corp' },
+      { path: '/v1/ping?kind=view&extra=1' },
+      { path: '/v1/ping' },
+    ]);
+    expect(out.map((r) => r.status)).toEqual([400, 400, 400, 400, 400]);
+    expect(events).toEqual([]);
+  });
+
+  it('needs the API key', async () => {
+    const { out, events } = await run([{ path: '/v1/ping?kind=view&page=home', key: 'wrong' }]);
+    expect(out[0].status).toBe(401);
+    expect(events).toEqual([]);
+  });
+});

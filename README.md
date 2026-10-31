@@ -63,3 +63,9 @@ Rate limiting is 60 requests/min per IP: in memory locally, the Workers rate-lim
 - **Request, error and CPU graphs**: the same page, under **Metrics**. A rise in 503s means D1 is failing (for example the daily free limit).
 - **D1 cost**: `npm run usage` lists the ten queries that read the most rows today. The free plan allows 5,000,000 rows read and 100,000 rows written per day, so check this after any query change.
 - **Per-visitor limits**: the Netlify proxy forwards each visitor's IP as `x-client-ip`, so the 60 requests/minute limit is per visitor, not per proxy.
+
+### Usage events
+
+`GET /v1/ping?kind=view|query|error&page=&company=&category=&status=` writes one line, `{"event":"track","kind":"query","company":"google","category":"dsa","visitor":"a1b2c3d4e5f6"}`. The visitor is the first 12 hex characters of SHA-256(address + UTC date + secret), so it counts distinct visitors per day, changes daily and cannot be reversed. The address itself is never logged. Params are validated strictly (fixed lists, slug pattern), the response is `no-store`, and the route needs the API key like the others.
+
+In the Cloudflare logs query builder: count by `kind` and `company` (most-queried companies), count by `category` (round types), unique `visitor` per day (visitors), count by `status` where `kind=error` (failure types).
